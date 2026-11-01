@@ -233,6 +233,7 @@ fn main() {
         buf.resize(globals.period * globals.channels, 0i16);
 
         let mut once_nominal = false;
+        let mut gain_restore_pending = false;
 
         loop {
             if sigquit.load(Ordering::Relaxed) {
@@ -269,6 +270,7 @@ fn main() {
                         pcm = None;
                         pcm = Some(helpers::open_pcm(&pcm_name, globals.channels.try_into().unwrap(), 0));
                         io = Some(pcm.as_ref().unwrap().io_i16().unwrap());
+                        gain_restore_pending = true;
                         continue;
                     }
                     Err(e)
@@ -345,6 +347,18 @@ fn main() {
             }
 
             unlock_elem.write_int(&ctl, UNLOCK_MAGIC);
+
+            if gain_restore_pending {
+                // Suspend clamps the mixer values even if the model's gain
+                // did not change. Invalidate after renewing the lease: the
+                // next fresh V/I block must write its model result again.
+                // A ping during PM quiesce can succeed without unlocking;
+                // keep invalidating until the kernel confirms the unlock.
+                for group in groups.values_mut() {
+                    group.gain = f32::NAN;
+                }
+                gain_restore_pending = unlock_elem.read_int(&ctl) != 1;
+            }
         }
     });
     if let Err(e) = result {
